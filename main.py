@@ -31,18 +31,6 @@ try:
     creds_global = ServiceAccountCredentials.from_json_keyfile_dict(cred_dict, scope)
     client_global = gspread.authorize(creds_global)
     SHEET_GLOBAL = client_global.open(SPREADSHEET_NAME).get_worksheet(0)
-    
-    # Comprobar y asegurar los encabezados en la primera fila
-    encabezados = [
-        "timestamp_captura", "firma_unica", "route_id", 
-        "trip_id", "vehicle_id", "lat", "lon", "current_status"
-    ]
-    
-    fila_1 = SHEET_GLOBAL.row_values(1)
-    if not fila_1 or fila_1[0] != "timestamp_captura":
-        SHEET_GLOBAL.insert_row(encabezados, 1)
-        print("📌 Encabezados insertados correctamente en la primera fila.")
-        
     print("✅ Conexión con Google Sheets establecida y lista.")
 except Exception as e:
     print(f"❌ Error al conectar con Sheets al inicio: {e}")
@@ -52,6 +40,7 @@ except Exception as e:
 def ejecutar_extraccion_cercanias():
     global SHEET_GLOBAL, client_global
     
+    # 1. RECONEXIÓN DE EMERGENCIA
     if SHEET_GLOBAL is None:
         print("⚠️ Hoja no conectada. Reintentando conexión inicial...")
         try:
@@ -61,24 +50,39 @@ def ejecutar_extraccion_cercanias():
             creds = ServiceAccountCredentials.from_json_keyfile_dict(cred_dict, scope)
             client_global = gspread.authorize(creds)
             SHEET_GLOBAL = client_global.open(SPREADSHEET_NAME).get_worksheet(0)
-            
-            fila_1 = SHEET_GLOBAL.row_values(1)
-            encabezados = [
-                "timestamp_captura", "firma_unica", "route_id", 
-                "trip_id", "vehicle_id", "lat", "lon", "current_status"
-            ]
-            if not fila_1 or fila_1[0] != "timestamp_captura":
-                SHEET_GLOBAL.insert_row(encabezados, 1)
         except Exception as e:
             print(f"⛔ Error en Sheets al reconectar: {e}")
             return
 
     try:
+        # 2. VERIFICACIÓN A PRUEBA DE BOMBAS DE LOS ENCABEZADOS (En cada ejecución)
+        encabezados = [
+            "timestamp_captura", "firma_unica", "route_id", 
+            "trip_id", "vehicle_id", "lat", "lon", "current_status"
+        ]
+        
+        try:
+            fila_1 = SHEET_GLOBAL.row_values(1)
+        except Exception:
+            fila_1 = []
+            
+        if not fila_1 or fila_1[0] != "timestamp_captura":
+            print("📌 Encabezados no detectados en la fila 1. Insertando de inmediato...")
+            SHEET_GLOBAL.insert_row(encabezados, 1)
+            time.sleep(1)  # Pausa de seguridad para que la API de Google asimile el cambio
+
+        # 3. LECTURA DE DATOS RECIENTES (Para evitar duplicados)
         total_filas = SHEET_GLOBAL.row_count
         inicio_lectura = max(1, total_filas - 300)
-        data_reciente = SHEET_GLOBAL.get_values(f"A{inicio_lectura}:N{total_filas}")
+        
+        try:
+            data_reciente = SHEET_GLOBAL.get_values(f"A{inicio_lectura}:H{max(1, total_filas)}")
+        except Exception:
+            data_reciente = []
+            
         firmas_existentes = {str(r[1]) for r in data_reciente if len(r) > 1}
 
+        # 4. PETICIÓN A LA FUENTE DE RENFE DATAS
         registros_crudos = []
         intentos_api = 0
         while intentos_api < 3:
@@ -97,35 +101,28 @@ def ejecutar_extraccion_cercanias():
             print("ℹ️ No se obtuvieron datos nuevos en este ciclo.")
             return
 
+        # 5. PROCESAMIENTO Y PARSEO DE VARIABLES
         ahora = datetime.now(ZONA_HORARIA)
         timestamp_captura = ahora.strftime("%Y-%m-%d %H:%M:%S")
         nuevos_registros = []
 
         for item in registros_crudos:
-            # ID principal de la entidad GTFS
             entity_id = item.get('id', 'N/D')
-            
-            # Bloque de vehículo
             vehicle_data = item.get('vehicle', {})
             
-            # Bloque de trip y IDs
             trip_info = vehicle_data.get('trip', {})
             trip_id = trip_info.get('trip_id', entity_id)
             route_id = trip_info.get('route_id', 'N/D')
             
-            # Datos identificativos del tren/vehículo
             vehicle_obj = vehicle_data.get('vehicle', {})
             vehicle_id = vehicle_obj.get('id', vehicle_obj.get('label', entity_id))
             
-            # Posición geográfica
             position = vehicle_data.get('position', {})
             lat = position.get('latitude', 0.0)
             lon = position.get('longitude', 0.0)
             
-            # Estado actual
             current_status = vehicle_data.get('current_status', 'N/D')
             
-            # Firma única para control de duplicados
             firma_unica = f"{trip_id}_{vehicle_id}_{timestamp_captura[:16]}"
             
             if firma_unica not in firmas_existentes:
@@ -140,6 +137,7 @@ def ejecutar_extraccion_cercanias():
                     current_status
                 ])
 
+        # 6. ESCRITURA EN GOOGLE SHEETS
         if nuevos_registros:
             intentos = 0
             while intentos < 3:
