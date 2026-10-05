@@ -102,19 +102,30 @@ def ejecutar_extraccion_cercanias():
         nuevos_registros = []
 
         for item in registros_crudos:
-            trip_update = item.get('vehicle', {})
-            trip_info = trip_update.get('trip', {})
+            # ID principal de la entidad GTFS
+            entity_id = item.get('id', 'N/D')
             
-            trip_id = trip_info.get('trip_id', 'N/D')
+            # Bloque de vehículo
+            vehicle_data = item.get('vehicle', {})
+            
+            # Bloque de trip y IDs
+            trip_info = vehicle_data.get('trip', {})
+            trip_id = trip_info.get('trip_id', entity_id)
             route_id = trip_info.get('route_id', 'N/D')
-            vehicle_id = trip_update.get('vehicle', {}).get('id', 'N/D')
             
-            position = trip_update.get('position', {})
+            # Datos identificativos del tren/vehículo
+            vehicle_obj = vehicle_data.get('vehicle', {})
+            vehicle_id = vehicle_obj.get('id', vehicle_obj.get('label', entity_id))
+            
+            # Posición geográfica
+            position = vehicle_data.get('position', {})
             lat = position.get('latitude', 0.0)
             lon = position.get('longitude', 0.0)
             
-            current_status = trip_update.get('current_status', 'N/D')
+            # Estado actual
+            current_status = vehicle_data.get('current_status', 'N/D')
             
+            # Firma única para control de duplicados
             firma_unica = f"{trip_id}_{vehicle_id}_{timestamp_captura[:16]}"
             
             if firma_unica not in firmas_existentes:
