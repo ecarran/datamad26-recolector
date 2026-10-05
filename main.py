@@ -14,12 +14,11 @@ from datetime import datetime
 ZONA_HORARIA = pytz.timezone("Europe/Madrid")
 SPREADSHEET_NAME = "Renfe_Dataset_Live" 
 
-# Endpoint oficial de Cercanías / GTFS Realtime de Renfe Data
 GTFS_VEHICLE_POSITIONS_URL = "https://gtfsrt.renfe.com/vehicle_positions.json"
 
 app = FastAPI()
 
-# --- CONEXIÓN GLOBAL PERSISTENTE A GOOGLE SHEETS (VÍA VARIABLES DE ENTORNO) ---
+# --- CONEXIÓN GLOBAL PERSISTENTE A GOOGLE SHEETS ---
 print("🔐 Inicializando conexión persistente con Google Sheets...")
 try:
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -32,6 +31,16 @@ try:
     creds_global = ServiceAccountCredentials.from_json_keyfile_dict(cred_dict, scope)
     client_global = gspread.authorize(creds_global)
     SHEET_GLOBAL = client_global.open(SPREADSHEET_NAME).get_worksheet(0)
+    
+    # Comprobar y añadir encabezados si la hoja está vacía
+    if not SHEET_GLOBAL.get_all_values():
+        encabezados = [
+            "timestamp_captura", "firma_unica", "route_id", 
+            "trip_id", "vehicle_id", "lat", "lon", "current_status"
+        ]
+        SHEET_GLOBAL.append_row(encabezados)
+        print("📌 Encabezados añadidos automáticamente a la hoja.")
+        
     print("✅ Conexión con Google Sheets establecida y lista.")
 except Exception as e:
     print(f"❌ Error al conectar con Sheets al inicio: {e}")
@@ -41,7 +50,6 @@ except Exception as e:
 def ejecutar_extraccion_cercanias():
     global SHEET_GLOBAL, client_global
     
-    # Reintento de conexión si falló al arrancar
     if SHEET_GLOBAL is None:
         print("⚠️ Hoja no conectada. Reintentando conexión inicial...")
         try:
@@ -51,18 +59,23 @@ def ejecutar_extraccion_cercanias():
             creds = ServiceAccountCredentials.from_json_keyfile_dict(cred_dict, scope)
             client_global = gspread.authorize(creds)
             SHEET_GLOBAL = client_global.open(SPREADSHEET_NAME).get_worksheet(0)
+            
+            if not SHEET_GLOBAL.get_all_values():
+                encabezados = [
+                    "timestamp_captura", "firma_unica", "route_id", 
+                    "trip_id", "vehicle_id", "lat", "lon", "current_status"
+                ]
+                SHEET_GLOBAL.append_row(encabezados)
         except Exception as e:
             print(f"⛔ Error en Sheets al reconectar: {e}")
             return
 
     try:
-        # 1. LECTURA DE DATOS RECIENTES EN LA HOJA (Para evitar duplicados)
         total_filas = SHEET_GLOBAL.row_count
         inicio_lectura = max(1, total_filas - 300)
         data_reciente = SHEET_GLOBAL.get_values(f"A{inicio_lectura}:N{total_filas}")
         firmas_existentes = {str(r[1]) for r in data_reciente if len(r) > 1}
 
-        # 2. PETICIÓN A LA FUENTE DE RENFE DATAS (Cercanías)
         registros_crudos = []
         intentos_api = 0
         while intentos_api < 3:
@@ -74,14 +87,13 @@ def ejecutar_extraccion_cercanias():
                 break
             except Exception as e_api:
                 intentos_api += 1
-                print(f"⚠️ Error al conectar con Renfe Data (Intento {intentos_api}/3): {e_api}")
+                print(f"⚠️️ Error al conectar con Renfe Data (Intento {intentos_api}/3): {e_api}")
                 time.sleep(5)
 
         if not registros_crudos:
-            print("ℹ️ No se obtuvieron datos nuevos en este ciclo o pendiente de ajustar endpoint específico.")
+            print("ℹ️ No se obtuvieron datos nuevos en este ciclo.")
             return
 
-        # 3. PROCESAMIENTO Y PARSEO DE VARIABLES PARA ML
         ahora = datetime.now(ZONA_HORARIA)
         timestamp_captura = ahora.strftime("%Y-%m-%d %H:%M:%S")
         nuevos_registros = []
@@ -100,7 +112,6 @@ def ejecutar_extraccion_cercanias():
             
             current_status = trip_update.get('current_status', 'N/D')
             
-            # Firma única para control de duplicados
             firma_unica = f"{trip_id}_{vehicle_id}_{timestamp_captura[:16]}"
             
             if firma_unica not in firmas_existentes:
@@ -115,7 +126,6 @@ def ejecutar_extraccion_cercanias():
                     current_status
                 ])
 
-        # 4. ESCRITURA EN GOOGLE SHEETS
         if nuevos_registros:
             intentos = 0
             while intentos < 3:
