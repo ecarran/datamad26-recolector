@@ -42,10 +42,10 @@ def inicializar_conexion_sheets():
         client_global = gspread.authorize(creds_global)
         workbook = client_global.open(SPREADSHEET_NAME)
         
-        # 1. Pestaña Posiciones (Hoja 0)
+        # 1. Pestaña Posiciones
         SHEET_POSICIONES = workbook.get_worksheet(0)
         
-        # 2. Pestaña Horarios (Hoja 1) - Crea si no existe
+        # 2. Pestaña Horarios
         try:
             SHEET_HORARIOS = workbook.get_worksheet(1)
             if SHEET_HORARIOS.title != "Horarios_Live":
@@ -53,7 +53,7 @@ def inicializar_conexion_sheets():
         except Exception:
             SHEET_HORARIOS = workbook.add_worksheet(title="Horarios_Live", rows="1000", cols="10")
             
-        # 3. Pestaña Alertas (Hoja 2) - Crea si no existe
+        # 3. Pestaña Alertas
         try:
             SHEET_ALERTAS = workbook.get_worksheet(2)
             if SHEET_ALERTAS.title != "Alertas_Live":
@@ -67,7 +67,6 @@ def inicializar_conexion_sheets():
         print(f"❌ Error al conectar con Sheets al inicio: {e}")
         return False
 
-# Inicialización en el arranque
 inicializar_conexion_sheets()
 
 # --- MÓDULO 1: POSICIONES ---
@@ -85,10 +84,11 @@ def ejecutar_extraccion_posiciones():
             SHEET_POSICIONES.insert_row(encabezados, 1)
             time.sleep(1)
 
-        total_filas = SHEET_POSICIONES.row_count
-        inicio_lectura = max(1, total_filas - 300)
-        try: data_reciente = SHEET_POSICIONES.get_values(f"A{inicio_lectura}:H{max(1, total_filas)}")
-        except Exception: data_reciente = []
+        # LECTURA CORREGIDA: Extrae solo los datos reales
+        try: 
+            data_reciente = SHEET_POSICIONES.get_all_values()[-300:]
+        except Exception: 
+            data_reciente = []
         firmas_existentes = {str(r[1]) for r in data_reciente if len(r) > 1}
 
         res = requests.get(URL_POSICIONES, timeout=15)
@@ -120,7 +120,7 @@ def ejecutar_extraccion_posiciones():
             
             if firma_unica not in firmas_existentes:
                 nuevos_registros.append([timestamp_captura, firma_unica, route_id, trip_id, vehicle_id, lat, lon, current_status])
-                firmas_existentes.add(firma_unica) # Bloqueo de duplicados intrapetición
+                firmas_existentes.add(firma_unica) # Evita duplicados dentro de la misma petición
 
         if nuevos_registros:
             SHEET_POSICIONES.append_rows(nuevos_registros)
@@ -128,7 +128,6 @@ def ejecutar_extraccion_posiciones():
 
     except Exception as e:
         print(f"❌ Error en extracción de POSICIONES: {e}")
-
 
 # --- MÓDULO 2: HORARIOS Y RETRASOS ---
 def ejecutar_extraccion_horarios():
@@ -145,10 +144,11 @@ def ejecutar_extraccion_horarios():
             SHEET_HORARIOS.insert_row(encabezados, 1)
             time.sleep(1)
 
-        total_filas = SHEET_HORARIOS.row_count
-        inicio_lectura = max(1, total_filas - 300)
-        try: data_reciente = SHEET_HORARIOS.get_values(f"A{inicio_lectura}:F{max(1, total_filas)}")
-        except Exception: data_reciente = []
+        # LECTURA CORREGIDA
+        try: 
+            data_reciente = SHEET_HORARIOS.get_all_values()[-300:]
+        except Exception: 
+            data_reciente = []
         firmas_existentes = {str(r[1]) for r in data_reciente if len(r) > 1}
 
         res = requests.get(URL_HORARIOS, timeout=15)
@@ -181,7 +181,7 @@ def ejecutar_extraccion_horarios():
             
             if firma_unica not in firmas_existentes:
                 nuevos_registros.append([timestamp_captura, firma_unica, trip_id, estado_viaje, stop_id, delay])
-                firmas_existentes.add(firma_unica) # Bloqueo de duplicados intrapetición
+                firmas_existentes.add(firma_unica)
 
         if nuevos_registros:
             SHEET_HORARIOS.append_rows(nuevos_registros)
@@ -189,7 +189,6 @@ def ejecutar_extraccion_horarios():
 
     except Exception as e:
         print(f"❌ Error en extracción de HORARIOS: {e}")
-
 
 # --- MÓDULO 3: INCIDENCIAS Y AVISOS ---
 def ejecutar_extraccion_alertas():
@@ -206,10 +205,11 @@ def ejecutar_extraccion_alertas():
             SHEET_ALERTAS.insert_row(encabezados, 1)
             time.sleep(1)
 
-        total_filas = SHEET_ALERTAS.row_count
-        inicio_lectura = max(1, total_filas - 500)
-        try: data_reciente = SHEET_ALERTAS.get_values(f"A{inicio_lectura}:F{max(1, total_filas)}")
-        except Exception: data_reciente = []
+        # LECTURA CORREGIDA
+        try: 
+            data_reciente = SHEET_ALERTAS.get_all_values()[-500:]
+        except Exception: 
+            data_reciente = []
         firmas_existentes = {str(r[1]) for r in data_reciente if len(r) > 1}
 
         res = requests.get(URL_ALERTAS, timeout=15)
@@ -247,7 +247,7 @@ def ejecutar_extraccion_alertas():
             
             if firma_unica not in firmas_existentes:
                 nuevos_registros.append([timestamp_captura, firma_unica, alert_id, tipo_alerta, entidades_afectadas, descripcion])
-                firmas_existentes.add(firma_unica) # Bloqueo de duplicados intrapetición
+                firmas_existentes.add(firma_unica)
 
         if nuevos_registros:
             SHEET_ALERTAS.append_rows(nuevos_registros)
@@ -255,7 +255,6 @@ def ejecutar_extraccion_alertas():
 
     except Exception as e:
         print(f"❌ Error en extracción de ALERTAS: {e}")
-
 
 # --- ENDPOINTS FASTAPI ---
 
