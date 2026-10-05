@@ -32,14 +32,16 @@ try:
     client_global = gspread.authorize(creds_global)
     SHEET_GLOBAL = client_global.open(SPREADSHEET_NAME).get_worksheet(0)
     
-    # Comprobar y añadir encabezados si la hoja está vacía
-    if not SHEET_GLOBAL.get_all_values():
-        encabezados = [
-            "timestamp_captura", "firma_unica", "route_id", 
-            "trip_id", "vehicle_id", "lat", "lon", "current_status"
-        ]
-        SHEET_GLOBAL.append_row(encabezados)
-        print("📌 Encabezados añadidos automáticamente a la hoja.")
+    # Comprobar y asegurar los encabezados en la primera fila
+    encabezados = [
+        "timestamp_captura", "firma_unica", "route_id", 
+        "trip_id", "vehicle_id", "lat", "lon", "current_status"
+    ]
+    
+    fila_1 = SHEET_GLOBAL.row_values(1)
+    if not fila_1 or fila_1[0] != "timestamp_captura":
+        SHEET_GLOBAL.insert_row(encabezados, 1)
+        print("📌 Encabezados insertados correctamente en la primera fila.")
         
     print("✅ Conexión con Google Sheets establecida y lista.")
 except Exception as e:
@@ -60,12 +62,13 @@ def ejecutar_extraccion_cercanias():
             client_global = gspread.authorize(creds)
             SHEET_GLOBAL = client_global.open(SPREADSHEET_NAME).get_worksheet(0)
             
-            if not SHEET_GLOBAL.get_all_values():
-                encabezados = [
-                    "timestamp_captura", "firma_unica", "route_id", 
-                    "trip_id", "vehicle_id", "lat", "lon", "current_status"
-                ]
-                SHEET_GLOBAL.append_row(encabezados)
+            fila_1 = SHEET_GLOBAL.row_values(1)
+            encabezados = [
+                "timestamp_captura", "firma_unica", "route_id", 
+                "trip_id", "vehicle_id", "lat", "lon", "current_status"
+            ]
+            if not fila_1 or fila_1[0] != "timestamp_captura":
+                SHEET_GLOBAL.insert_row(encabezados, 1)
         except Exception as e:
             print(f"⛔ Error en Sheets al reconectar: {e}")
             return
@@ -87,7 +90,7 @@ def ejecutar_extraccion_cercanias():
                 break
             except Exception as e_api:
                 intentos_api += 1
-                print(f"⚠️️ Error al conectar con Renfe Data (Intento {intentos_api}/3): {e_api}")
+                print(f"⚠️ Error al conectar con Renfe Data (Intento {intentos_api}/3): {e_api}")
                 time.sleep(5)
 
         if not registros_crudos:
