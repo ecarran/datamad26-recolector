@@ -1,5 +1,6 @@
 import time
 import os
+import json
 import pytz
 import gspread
 import threading
@@ -11,8 +12,6 @@ from datetime import datetime
 
 # --- CONFIGURACIÓN ---
 ZONA_HORARIA = pytz.timezone("Europe/Madrid")
-GOOGLE_JSON = "service_account.json" 
-# Reemplaza con el nombre exacto de tu Google Sheets configurado
 SPREADSHEET_NAME = "Renfe_Dataset_Live" 
 
 # Nota: Reemplazar o ajustar con el endpoint oficial de Cercanías / GTFS Realtime de Renfe Data
@@ -20,11 +19,17 @@ GTFS_VEHICLE_POSITIONS_URL = "https://api.renfe.com/cercanias/vehicle_positions.
 
 app = FastAPI()
 
-# --- CONEXIÓN GLOBAL PERSISTENTE A GOOGLE SHEETS ---
+# --- CONEXIÓN GLOBAL PERSISTENTE A GOOGLE SHEETS (VÍA VARIABLES DE ENTORNO) ---
 print("🔐 Inicializando conexión persistente con Google Sheets...")
 try:
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds_global = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_JSON, scope)
+    creds_json_string = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+    
+    if not creds_json_string:
+        raise ValueError("La variable de entorno GOOGLE_CREDENTIALS_JSON no está configurada.")
+        
+    cred_dict = json.loads(creds_json_string)
+    creds_global = ServiceAccountCredentials.from_json_keyfile_dict(cred_dict, scope)
     client_global = gspread.authorize(creds_global)
     SHEET_GLOBAL = client_global.open(SPREADSHEET_NAME).get_worksheet(0)
     print("✅ Conexión con Google Sheets establecida y lista.")
@@ -41,7 +46,9 @@ def ejecutar_extraccion_cercanias():
         print("⚠️ Hoja no conectada. Reintentando conexión inicial...")
         try:
             scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-            creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_JSON, scope)
+            creds_json_string = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+            cred_dict = json.loads(creds_json_string)
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(cred_dict, scope)
             client_global = gspread.authorize(creds)
             SHEET_GLOBAL = client_global.open(SPREADSHEET_NAME).get_worksheet(0)
         except Exception as e:
@@ -49,11 +56,10 @@ def ejecutar_extraccion_cercanias():
             return
 
     try:
-        # 1. LECTURA DE DATOS RECIENTES EN LA HOJA (Para evitar duplicados, tipo Adif/Barajas)
+        # 1. LECTURA DE DATOS RECIENTES EN LA HOJA (Para evitar duplicados)
         total_filas = SHEET_GLOBAL.row_count
         inicio_lectura = max(1, total_filas - 300)
         data_reciente = SHEET_GLOBAL.get_values(f"A{inicio_lectura}:N{total_filas}")
-        # Asumiendo que guardamos una firma única en la columna 2 (índice 1)
         firmas_existentes = {str(r[1]) for r in data_reciente if len(r) > 1}
 
         # 2. PETICIÓN A LA FUENTE DE RENFE DATAS (Cercanías)
@@ -61,7 +67,6 @@ def ejecutar_extraccion_cercanias():
         intentos_api = 0
         while intentos_api < 3:
             try:
-                # Aquí se conecta con el feed correspondiente de Cercanías
                 # res = requests.get(GTFS_VEHICLE_POSITIONS_URL, timeout=15)
                 # res.raise_for_status()
                 # registros_crudos = res.json().get('entity', [])
@@ -81,22 +86,15 @@ def ejecutar_extraccion_cercanias():
         nuevos_registros = []
 
         for item in registros_crudos:
-            # Parseo adaptado a la estructura GTFS Realtime (Trip ID, Posición, Retraso, Línea)
+            # Parseo adaptado a la estructura GTFS Realtime
             # trip_id = item.get('trip', {}).get('trip_id', 'N/D')
-            # delay = item.get('trip', {}).get('delay', 0) # Segundos de retraso (Target clave para ML)
-            
-            # Firma única para control de duplicados
-            # firma_unica = f"{trip_id}_{timestamp_captura[:16]}" # Ejemplo de huella temporal corta
-            
+            # delay = item.get('trip', {}).get('delay', 0)
+            # firma_unica = f"{trip_id}_{timestamp_captura[:16]}"
             # if firma_unica not in firmas_existentes:
-            #     nuevos_registros.append([
-            #         timestamp_captura,
-            #         firma_unica,
-            #         ... # Resto de features: línea, lat, lon, delay, etc.
-            #     ])
+            #     nuevos_registros.append([timestamp_captura, firma_unica, ...])
             pass
 
-        # 4. ESCRITURA EN GOOGLE SHEETS (Con reintentos y tolerancia a fallos de API)
+        # 4. ESCRITURA EN GOOGLE SHEETS
         if nuevos_registros:
             intentos = 0
             while intentos < 3:
@@ -109,8 +107,9 @@ def ejecutar_extraccion_cercanias():
                     print(f"🔄 Error de API de Google Sheets (Intento {intentos}/3): {e_sheet}")
                     time.sleep(5)
                     try:
-                        # Reautenticación de emergencia
-                        creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_JSON, ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"])
+                        creds_json_string = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+                        cred_dict = json.loads(creds_json_string)
+                        creds = ServiceAccountCredentials.from_json_keyfile_dict(cred_dict, ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"])
                         client_global = gspread.authorize(creds)
                         SHEET_GLOBAL = client_global.open(SPREADSHEET_NAME).get_worksheet(0)
                     except:
@@ -131,7 +130,6 @@ def ping():
 
 @app.get("/recolectar")
 def recolectar():
-    # Lanzamos en background para evitar timeouts en el cron-job externo
     threading.Thread(target=ejecutar_extraccion_cercanias).start()
     return {"status": "started", "msg": "Extracción de Cercanías iniciada en background"}
 
