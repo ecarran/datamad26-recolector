@@ -70,7 +70,7 @@ def inicializar_conexion_sheets():
 # Inicialización en el arranque
 inicializar_conexion_sheets()
 
-# --- MÓDULO 1: POSICIONES (El original intacto) ---
+# --- MÓDULO 1: POSICIONES ---
 def ejecutar_extraccion_posiciones():
     global SHEET_POSICIONES
     if SHEET_POSICIONES is None and not inicializar_conexion_sheets():
@@ -120,6 +120,7 @@ def ejecutar_extraccion_posiciones():
             
             if firma_unica not in firmas_existentes:
                 nuevos_registros.append([timestamp_captura, firma_unica, route_id, trip_id, vehicle_id, lat, lon, current_status])
+                firmas_existentes.add(firma_unica) # Bloqueo de duplicados intrapetición
 
         if nuevos_registros:
             SHEET_POSICIONES.append_rows(nuevos_registros)
@@ -180,6 +181,7 @@ def ejecutar_extraccion_horarios():
             
             if firma_unica not in firmas_existentes:
                 nuevos_registros.append([timestamp_captura, firma_unica, trip_id, estado_viaje, stop_id, delay])
+                firmas_existentes.add(firma_unica) # Bloqueo de duplicados intrapetición
 
         if nuevos_registros:
             SHEET_HORARIOS.append_rows(nuevos_registros)
@@ -204,7 +206,6 @@ def ejecutar_extraccion_alertas():
             SHEET_ALERTAS.insert_row(encabezados, 1)
             time.sleep(1)
 
-        # Buscamos en las últimas 500 filas para que no se duplique la alerta el mismo día
         total_filas = SHEET_ALERTAS.row_count
         inicio_lectura = max(1, total_filas - 500)
         try: data_reciente = SHEET_ALERTAS.get_values(f"A{inicio_lectura}:F{max(1, total_filas)}")
@@ -226,7 +227,6 @@ def ejecutar_extraccion_alertas():
             
             alert_data = item.get('alert', {})
             
-            # Extraer IDs afectados (Rutas o Paradas)
             informed_entities = alert_data.get('informedEntity', [])
             afectados = []
             for e in informed_entities:
@@ -234,7 +234,6 @@ def ejecutar_extraccion_alertas():
                 elif 'stopId' in e: afectados.append(str(e['stopId']))
             entidades_afectadas = ",".join(afectados) if afectados else "N/D"
             
-            # Extraer Texto en Español
             desc_texts = alert_data.get('descriptionText', {}).get('translation', [])
             descripcion = 'N/D'
             for dt in desc_texts:
@@ -244,11 +243,11 @@ def ejecutar_extraccion_alertas():
             if descripcion == 'N/D' and desc_texts:
                  descripcion = desc_texts[0].get('text', 'N/D')
                  
-            # Firma única de alerta (ID de la alerta + Fecha de hoy) para guardarla solo 1 vez al día
             firma_unica = f"{alert_id}_{fecha_corta}"
             
             if firma_unica not in firmas_existentes:
                 nuevos_registros.append([timestamp_captura, firma_unica, alert_id, tipo_alerta, entidades_afectadas, descripcion])
+                firmas_existentes.add(firma_unica) # Bloqueo de duplicados intrapetición
 
         if nuevos_registros:
             SHEET_ALERTAS.append_rows(nuevos_registros)
@@ -268,13 +267,11 @@ def home():
 def ping():
     return {"status": "alive", "timestamp": datetime.now(ZONA_HORARIA).isoformat()}
 
-# Endpoint original (No lo borramos para no romper lo que ya tienes montado)
 @app.get("/recolectar")
 def recolectar_posiciones():
     threading.Thread(target=ejecutar_extraccion_posiciones).start()
     return {"status": "started", "msg": "Extracción de Posiciones iniciada en background"}
 
-# Nuevos endpoints independientes
 @app.get("/recolectar_horarios")
 def recolectar_horarios():
     threading.Thread(target=ejecutar_extraccion_horarios).start()
@@ -285,7 +282,6 @@ def recolectar_alertas():
     threading.Thread(target=ejecutar_extraccion_alertas).start()
     return {"status": "started", "msg": "Extracción de Alertas iniciada en background"}
 
-# Extra point: Endpoint maestro para disparar los 3 a la vez
 @app.get("/recolectar_todo")
 def recolectar_todo():
     threading.Thread(target=ejecutar_extraccion_posiciones).start()
