@@ -40,7 +40,6 @@ except Exception as e:
 def ejecutar_extraccion_cercanias():
     global SHEET_GLOBAL, client_global
     
-    # 1. RECONEXIÓN DE EMERGENCIA
     if SHEET_GLOBAL is None:
         print("⚠️ Hoja no conectada. Reintentando conexión inicial...")
         try:
@@ -55,7 +54,7 @@ def ejecutar_extraccion_cercanias():
             return
 
     try:
-        # 2. VERIFICACIÓN A PRUEBA DE BOMBAS DE LOS ENCABEZADOS (En cada ejecución)
+        # 1. VERIFICACIÓN DE ENCABEZADOS
         encabezados = [
             "timestamp_captura", "firma_unica", "route_id", 
             "trip_id", "vehicle_id", "lat", "lon", "current_status"
@@ -67,11 +66,11 @@ def ejecutar_extraccion_cercanias():
             fila_1 = []
             
         if not fila_1 or fila_1[0] != "timestamp_captura":
-            print("📌 Encabezados no detectados en la fila 1. Insertando de inmediato...")
+            print("📌 Encabezados no detectados en la fila 1. Insertando...")
             SHEET_GLOBAL.insert_row(encabezados, 1)
-            time.sleep(1)  # Pausa de seguridad para que la API de Google asimile el cambio
+            time.sleep(1)
 
-        # 3. LECTURA DE DATOS RECIENTES (Para evitar duplicados)
+        # 2. LECTURA DE DATOS RECIENTES (Para evitar duplicados)
         total_filas = SHEET_GLOBAL.row_count
         inicio_lectura = max(1, total_filas - 300)
         
@@ -82,7 +81,7 @@ def ejecutar_extraccion_cercanias():
             
         firmas_existentes = {str(r[1]) for r in data_reciente if len(r) > 1}
 
-        # 4. PETICIÓN A LA FUENTE DE RENFE DATAS
+        # 3. PETICIÓN A LA FUENTE DE RENFE
         registros_crudos = []
         intentos_api = 0
         while intentos_api < 3:
@@ -98,10 +97,10 @@ def ejecutar_extraccion_cercanias():
                 time.sleep(5)
 
         if not registros_crudos:
-            print("ℹ️ No se obtuvieron datos nuevos en este ciclo.")
+            print("ℹ️ No se obtuvieron datos nuevos.")
             return
 
-        # 5. PROCESAMIENTO Y PARSEO DE VARIABLES
+        # 4. PROCESAMIENTO EXACTO BASADO EN EL JSON DE RENFE
         ahora = datetime.now(ZONA_HORARIA)
         timestamp_captura = ahora.strftime("%Y-%m-%d %H:%M:%S")
         nuevos_registros = []
@@ -110,18 +109,26 @@ def ejecutar_extraccion_cercanias():
             entity_id = item.get('id', 'N/D')
             vehicle_data = item.get('vehicle', {})
             
+            # Bloque Trip (usa tripId)
             trip_info = vehicle_data.get('trip', {})
-            trip_id = trip_info.get('trip_id', entity_id)
-            route_id = trip_info.get('route_id', 'N/D')
+            trip_id = trip_info.get('tripId', entity_id)
             
+            # La ruta no viene en el JSON, hay que extraerla de "VP_C1-23566"
+            route_id = 'N/D'
+            if str(entity_id).startswith('VP_'):
+                route_id = str(entity_id).split('-')[0].replace('VP_', '')
+                
+            # Bloque Vehículo
             vehicle_obj = vehicle_data.get('vehicle', {})
-            vehicle_id = vehicle_obj.get('id', vehicle_obj.get('label', entity_id))
+            vehicle_id = vehicle_obj.get('id', 'N/D')
             
+            # Coordenadas
             position = vehicle_data.get('position', {})
             lat = position.get('latitude', 0.0)
             lon = position.get('longitude', 0.0)
             
-            current_status = vehicle_data.get('current_status', 'N/D')
+            # Estado (usa currentStatus, por defecto EN_RUTA si viene vacío)
+            current_status = vehicle_data.get('currentStatus', 'EN_RUTA')
             
             firma_unica = f"{trip_id}_{vehicle_id}_{timestamp_captura[:16]}"
             
@@ -137,17 +144,17 @@ def ejecutar_extraccion_cercanias():
                     current_status
                 ])
 
-        # 6. ESCRITURA EN GOOGLE SHEETS
+        # 5. ESCRITURA EN GOOGLE SHEETS
         if nuevos_registros:
             intentos = 0
             while intentos < 3:
                 try:
                     SHEET_GLOBAL.append_rows(nuevos_registros)
-                    print(f"✅ DATASET CERCANÍAS ACTUALIZADO: {len(nuevos_registros)} registros inyectados.")
+                    print(f"✅ DATASET CERCANÍAS ACTUALIZADO: {len(nuevos_registros)} registros.")
                     break
                 except Exception as e_sheet:
                     intentos += 1
-                    print(f"🔄 Error de API de Google Sheets (Intento {intentos}/3): {e_sheet}")
+                    print(f"🔄 Error de API (Intento {intentos}/3): {e_sheet}")
                     time.sleep(5)
                     try:
                         creds_json_string = os.environ.get("GOOGLE_CREDENTIALS_JSON")
@@ -159,7 +166,7 @@ def ejecutar_extraccion_cercanias():
                         pass
 
     except Exception as e:
-        print(f"❌ Error crítico en el ciclo de extracción: {e}")
+        print(f"❌ Error crítico en extracción: {e}")
 
 # --- ENDPOINTS FASTAPI ---
 
@@ -174,7 +181,7 @@ def ping():
 @app.get("/recolectar")
 def recolectar():
     threading.Thread(target=ejecutar_extraccion_cercanias).start()
-    return {"status": "started", "msg": "Extracción de Cercanías iniciada en background"}
+    return {"status": "started", "msg": "Extracción de Cercanías iniciada"}
 
 if __name__ == '__main__':
     import uvicorn
