@@ -14,8 +14,8 @@ from datetime import datetime
 ZONA_HORARIA = pytz.timezone("Europe/Madrid")
 SPREADSHEET_NAME = "Renfe_Dataset_Live" 
 
-# Nota: Reemplazar o ajustar con el endpoint oficial de Cercanías / GTFS Realtime de Renfe Data
-GTFS_VEHICLE_POSITIONS_URL = "https://api.renfe.com/cercanias/vehicle_positions.json" # (Ejemplo de referencia)
+# Endpoint oficial de Cercanías / GTFS Realtime de Renfe Data
+GTFS_VEHICLE_POSITIONS_URL = "https://gtfsrt.renfe.com/vehicle_positions.json"
 
 app = FastAPI()
 
@@ -67,9 +67,10 @@ def ejecutar_extraccion_cercanias():
         intentos_api = 0
         while intentos_api < 3:
             try:
-                # res = requests.get(GTFS_VEHICLE_POSITIONS_URL, timeout=15)
-                # res.raise_for_status()
-                # registros_crudos = res.json().get('entity', [])
+                res = requests.get(GTFS_VEHICLE_POSITIONS_URL, timeout=15)
+                res.raise_for_status()
+                data_json = res.json()
+                registros_crudos = data_json.get('entity', [])
                 break
             except Exception as e_api:
                 intentos_api += 1
@@ -86,13 +87,33 @@ def ejecutar_extraccion_cercanias():
         nuevos_registros = []
 
         for item in registros_crudos:
-            # Parseo adaptado a la estructura GTFS Realtime
-            # trip_id = item.get('trip', {}).get('trip_id', 'N/D')
-            # delay = item.get('trip', {}).get('delay', 0)
-            # firma_unica = f"{trip_id}_{timestamp_captura[:16]}"
-            # if firma_unica not in firmas_existentes:
-            #     nuevos_registros.append([timestamp_captura, firma_unica, ...])
-            pass
+            trip_update = item.get('vehicle', {})
+            trip_info = trip_update.get('trip', {})
+            
+            trip_id = trip_info.get('trip_id', 'N/D')
+            route_id = trip_info.get('route_id', 'N/D')
+            vehicle_id = trip_update.get('vehicle', {}).get('id', 'N/D')
+            
+            position = trip_update.get('position', {})
+            lat = position.get('latitude', 0.0)
+            lon = position.get('longitude', 0.0)
+            
+            current_status = trip_update.get('current_status', 'N/D')
+            
+            # Firma única para control de duplicados
+            firma_unica = f"{trip_id}_{vehicle_id}_{timestamp_captura[:16]}"
+            
+            if firma_unica not in firmas_existentes:
+                nuevos_registros.append([
+                    timestamp_captura,
+                    firma_unica,
+                    route_id,
+                    trip_id,
+                    vehicle_id,
+                    lat,
+                    lon,
+                    current_status
+                ])
 
         # 4. ESCRITURA EN GOOGLE SHEETS
         if nuevos_registros:
