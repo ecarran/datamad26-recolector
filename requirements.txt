@@ -2,4 +2,4 @@ requests
 pytz
 fastapi
 uvicorn
-psycopg2-binary
+supabase
