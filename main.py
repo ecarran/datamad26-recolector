@@ -1,8 +1,7 @@
 import os
 import pytz
-import threading
 import requests
-from fastapi import FastAPI
+from fastapi import FastAPI, BackgroundTasks
 from datetime import datetime
 from supabase import create_client, Client
 
@@ -60,7 +59,6 @@ def ejecutar_extraccion_posiciones():
                 firmas_locales.add(firma_unica)
 
         if nuevos_registros:
-            # Upsert ignora duplicados usando la Primary Key (firma_unica)
             supabase.table("posiciones_live").upsert(
                 nuevos_registros, on_conflict="firma_unica", ignore_duplicates=True
             ).execute()
@@ -162,17 +160,21 @@ def ejecutar_extraccion_alertas():
     except Exception as e:
         print(f"❌ Error en extracción de ALERTAS REST: {e}")
 
+# --- FLUJO SECUENCIAL ---
+def recoleccion_secuencial():
+    ejecutar_extraccion_posiciones()
+    ejecutar_extraccion_horarios()
+    ejecutar_extraccion_alertas()
+
 # --- ENDPOINTS FASTAPI ---
 @app.get("/")
 def home():
     return {"status": "online", "msg": "Recolector REST Cercanías - Operativo"}
 
 @app.get("/recolectar_todo")
-def recolectar_todo():
-    threading.Thread(target=ejecutar_extraccion_posiciones).start()
-    threading.Thread(target=ejecutar_extraccion_horarios).start()
-    threading.Thread(target=ejecutar_extraccion_alertas).start()
-    return {"status": "started", "msg": "Extracción REST paralela iniciada."}
+def recolectar_todo(background_tasks: BackgroundTasks):
+    background_tasks.add_task(recoleccion_secuencial)
+    return {"status": "started", "msg": "Extracción secuencial en segundo plano iniciada."}
 
 if __name__ == '__main__':
     import uvicorn
