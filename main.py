@@ -1,18 +1,15 @@
 import time
 import os
-import json
 import pytz
-import gspread
 import threading
 import requests
+import psycopg2
+from psycopg2.extras import execute_values
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
-from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 
 # --- CONFIGURACIÓN ---
 ZONA_HORARIA = pytz.timezone("Europe/Madrid")
-SPREADSHEET_NAME = "Renfe_Dataset_Live" 
 
 # --- ENDPOINTS OFICIALES RENFE ---
 URL_POSICIONES = "https://gtfsrt.renfe.com/vehicle_positions.json"
@@ -21,76 +18,16 @@ URL_ALERTAS = "https://gtfsrt.renfe.com/alerts.json"
 
 app = FastAPI()
 
-# --- CONEXIÓN GLOBAL PERSISTENTE A GOOGLE SHEETS ---
-client_global = None
-SHEET_POSICIONES = None
-SHEET_HORARIOS = None
-SHEET_ALERTAS = None
-
-def inicializar_conexion_sheets():
-    global client_global, SHEET_POSICIONES, SHEET_HORARIOS, SHEET_ALERTAS
-    print("🔐 Inicializando conexión persistente con Google Sheets...")
-    try:
-        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        creds_json_string = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-        
-        if not creds_json_string:
-            raise ValueError("La variable de entorno GOOGLE_CREDENTIALS_JSON no está configurada.")
-            
-        cred_dict = json.loads(creds_json_string)
-        creds_global = ServiceAccountCredentials.from_json_keyfile_dict(cred_dict, scope)
-        client_global = gspread.authorize(creds_global)
-        workbook = client_global.open(SPREADSHEET_NAME)
-        
-        # 1. Pestaña Posiciones
-        SHEET_POSICIONES = workbook.get_worksheet(0)
-        
-        # 2. Pestaña Horarios
-        try:
-            SHEET_HORARIOS = workbook.get_worksheet(1)
-            if SHEET_HORARIOS.title != "Horarios_Live":
-                SHEET_HORARIOS.update_title("Horarios_Live")
-        except Exception:
-            SHEET_HORARIOS = workbook.add_worksheet(title="Horarios_Live", rows="1000", cols="10")
-            
-        # 3. Pestaña Alertas
-        try:
-            SHEET_ALERTAS = workbook.get_worksheet(2)
-            if SHEET_ALERTAS.title != "Alertas_Live":
-                SHEET_ALERTAS.update_title("Alertas_Live")
-        except Exception:
-            SHEET_ALERTAS = workbook.add_worksheet(title="Alertas_Live", rows="1000", cols="10")
-
-        print("✅ Conexión con Google Sheets establecida y pestañas validadas.")
-        return True
-    except Exception as e:
-        print(f"❌ Error al conectar con Sheets al inicio: {e}")
-        return False
-
-inicializar_conexion_sheets()
+def get_db_connection():
+    # Obtiene la cadena de conexión desde Render
+    db_url = os.environ.get("DATABASE_URL")
+    if not db_url:
+        raise ValueError("La variable DATABASE_URL no está configurada.")
+    return psycopg2.connect(db_url)
 
 # --- MÓDULO 1: POSICIONES ---
 def ejecutar_extraccion_posiciones():
-    global SHEET_POSICIONES
-    if SHEET_POSICIONES is None and not inicializar_conexion_sheets():
-        return
-
     try:
-        encabezados = ["timestamp_captura", "firma_unica", "route_id", "trip_id", "vehicle_id", "lat", "lon", "current_status"]
-        try: fila_1 = SHEET_POSICIONES.row_values(1)
-        except Exception: fila_1 = []
-            
-        if not fila_1 or fila_1[0] != "timestamp_captura":
-            SHEET_POSICIONES.insert_row(encabezados, 1)
-            time.sleep(1)
-
-        # LECTURA CORREGIDA: Extrae solo los datos reales
-        try: 
-            data_reciente = SHEET_POSICIONES.get_all_values()[-300:]
-        except Exception: 
-            data_reciente = []
-        firmas_existentes = {str(r[1]) for r in data_reciente if len(r) > 1}
-
         res = requests.get(URL_POSICIONES, timeout=15)
         res.raise_for_status()
         registros_crudos = res.json().get('entity', [])
@@ -98,6 +35,9 @@ def ejecutar_extraccion_posiciones():
         ahora = datetime.now(ZONA_HORARIA)
         timestamp_captura = ahora.strftime("%Y-%m-%d %H:%M:%S")
         nuevos_registros = []
+        
+        # Diccionario local temporal para no añadir duplicados en el mismo JSON
+        firmas_locales = set() 
 
         for item in registros_crudos:
             entity_id = item.get('id', 'N/D')
@@ -105,9 +45,7 @@ def ejecutar_extraccion_posiciones():
             trip_info = vehicle_data.get('trip', {})
             trip_id = trip_info.get('tripId', entity_id)
             
-            route_id = 'N/D'
-            if str(entity_id).startswith('VP_'):
-                route_id = str(entity_id).split('-')[0].replace('VP_', '')
+            route_id = str(entity_id).split('-')[0].replace('VP_', '') if str(entity_id).startswith('VP_') else 'N/D'
                 
             vehicle_obj = vehicle_data.get('vehicle', {})
             vehicle_id = vehicle_obj.get('id', 'N/D')
@@ -118,39 +56,30 @@ def ejecutar_extraccion_posiciones():
             
             firma_unica = f"{trip_id}_{vehicle_id}_{timestamp_captura[:16]}"
             
-            if firma_unica not in firmas_existentes:
-                nuevos_registros.append([timestamp_captura, firma_unica, route_id, trip_id, vehicle_id, lat, lon, current_status])
-                firmas_existentes.add(firma_unica) # Evita duplicados dentro de la misma petición
+            if firma_unica not in firmas_locales:
+                nuevos_registros.append((timestamp_captura, firma_unica, route_id, trip_id, vehicle_id, lat, lon, current_status))
+                firmas_locales.add(firma_unica)
 
         if nuevos_registros:
-            SHEET_POSICIONES.append_rows(nuevos_registros)
-            print(f"📍 Posiciones: {len(nuevos_registros)} registros inyectados.")
+            conn = get_db_connection()
+            cur = conn.cursor()
+            # ON CONFLICT DO NOTHING evita duplicados en base de datos de forma nativa
+            insert_query = """
+                INSERT INTO posiciones_live (timestamp_captura, firma_unica, route_id, trip_id, vehicle_id, lat, lon, current_status) 
+                VALUES %s ON CONFLICT (firma_unica) DO NOTHING
+            """
+            execute_values(cur, insert_query, nuevos_registros)
+            conn.commit()
+            cur.close()
+            conn.close()
+            print(f"📍 Posiciones SQL: {len(nuevos_registros)} procesadas.")
 
     except Exception as e:
-        print(f"❌ Error en extracción de POSICIONES: {e}")
+        print(f"❌ Error en extracción de POSICIONES SQL: {e}")
 
 # --- MÓDULO 2: HORARIOS Y RETRASOS ---
 def ejecutar_extraccion_horarios():
-    global SHEET_HORARIOS
-    if SHEET_HORARIOS is None and not inicializar_conexion_sheets():
-        return
-
     try:
-        encabezados = ["timestamp_captura", "firma_unica", "trip_id", "estado_viaje", "stop_id", "retraso_segundos"]
-        try: fila_1 = SHEET_HORARIOS.row_values(1)
-        except Exception: fila_1 = []
-            
-        if not fila_1 or fila_1[0] != "timestamp_captura":
-            SHEET_HORARIOS.insert_row(encabezados, 1)
-            time.sleep(1)
-
-        # LECTURA CORREGIDA
-        try: 
-            data_reciente = SHEET_HORARIOS.get_all_values()[-300:]
-        except Exception: 
-            data_reciente = []
-        firmas_existentes = {str(r[1]) for r in data_reciente if len(r) > 1}
-
         res = requests.get(URL_HORARIOS, timeout=15)
         res.raise_for_status()
         registros_crudos = res.json().get('entity', [])
@@ -158,6 +87,7 @@ def ejecutar_extraccion_horarios():
         ahora = datetime.now(ZONA_HORARIA)
         timestamp_captura = ahora.strftime("%Y-%m-%d %H:%M:%S")
         nuevos_registros = []
+        firmas_locales = set()
 
         for item in registros_crudos:
             entity_id = item.get('id', 'N/D')
@@ -167,51 +97,41 @@ def ejecutar_extraccion_horarios():
             trip_id = trip_info.get('tripId', entity_id)
             estado_viaje = trip_info.get('scheduleRelationship', 'SCHEDULED')
             
-            delay = trip_update.get('delay', 'N/D')
+            delay = trip_update.get('delay', None)
             stop_id = 'N/D'
             
             stop_time_updates = trip_update.get('stopTimeUpdate', [])
             if stop_time_updates:
                 stop_id = stop_time_updates[0].get('stopId', 'N/D')
-                if delay == 'N/D':
+                if delay is None:
                     arrival = stop_time_updates[0].get('arrival', {})
-                    delay = arrival.get('delay', 'N/D')
+                    delay = arrival.get('delay', None)
             
             firma_unica = f"{trip_id}_{timestamp_captura[:16]}"
             
-            if firma_unica not in firmas_existentes:
-                nuevos_registros.append([timestamp_captura, firma_unica, trip_id, estado_viaje, stop_id, delay])
-                firmas_existentes.add(firma_unica)
+            if firma_unica not in firmas_locales:
+                nuevos_registros.append((timestamp_captura, firma_unica, trip_id, estado_viaje, stop_id, delay))
+                firmas_locales.add(firma_unica)
 
         if nuevos_registros:
-            SHEET_HORARIOS.append_rows(nuevos_registros)
-            print(f"⏱️ Horarios: {len(nuevos_registros)} registros inyectados.")
+            conn = get_db_connection()
+            cur = conn.cursor()
+            insert_query = """
+                INSERT INTO horarios_live (timestamp_captura, firma_unica, trip_id, estado_viaje, stop_id, retraso_segundos) 
+                VALUES %s ON CONFLICT (firma_unica) DO NOTHING
+            """
+            execute_values(cur, insert_query, nuevos_registros)
+            conn.commit()
+            cur.close()
+            conn.close()
+            print(f"⏱️ Horarios SQL: {len(nuevos_registros)} procesados.")
 
     except Exception as e:
-        print(f"❌ Error en extracción de HORARIOS: {e}")
+        print(f"❌ Error en extracción de HORARIOS SQL: {e}")
 
-# --- MÓDULO 3: INCIDENCIAS Y AVISOS ---
+# --- MÓDULO 3: ALERTAS ---
 def ejecutar_extraccion_alertas():
-    global SHEET_ALERTAS
-    if SHEET_ALERTAS is None and not inicializar_conexion_sheets():
-        return
-
     try:
-        encabezados = ["timestamp_captura", "firma_unica", "alert_id", "tipo_alerta", "entidades_afectadas", "descripcion"]
-        try: fila_1 = SHEET_ALERTAS.row_values(1)
-        except Exception: fila_1 = []
-            
-        if not fila_1 or fila_1[0] != "timestamp_captura":
-            SHEET_ALERTAS.insert_row(encabezados, 1)
-            time.sleep(1)
-
-        # LECTURA CORREGIDA
-        try: 
-            data_reciente = SHEET_ALERTAS.get_all_values()[-500:]
-        except Exception: 
-            data_reciente = []
-        firmas_existentes = {str(r[1]) for r in data_reciente if len(r) > 1}
-
         res = requests.get(URL_ALERTAS, timeout=15)
         res.raise_for_status()
         registros_crudos = res.json().get('entity', [])
@@ -220,11 +140,11 @@ def ejecutar_extraccion_alertas():
         timestamp_captura = ahora.strftime("%Y-%m-%d %H:%M:%S")
         fecha_corta = ahora.strftime("%Y-%m-%d")
         nuevos_registros = []
+        firmas_locales = set()
 
         for item in registros_crudos:
             alert_id = item.get('id', 'N/D')
             tipo_alerta = alert_id.split('_')[0] if '_' in alert_id else 'UNKNOWN'
-            
             alert_data = item.get('alert', {})
             
             informed_entities = alert_data.get('informedEntity', [])
@@ -245,48 +165,37 @@ def ejecutar_extraccion_alertas():
                  
             firma_unica = f"{alert_id}_{fecha_corta}"
             
-            if firma_unica not in firmas_existentes:
-                nuevos_registros.append([timestamp_captura, firma_unica, alert_id, tipo_alerta, entidades_afectadas, descripcion])
-                firmas_existentes.add(firma_unica)
+            if firma_unica not in firmas_locales:
+                nuevos_registros.append((timestamp_captura, firma_unica, alert_id, tipo_alerta, entidades_afectadas, descripcion))
+                firmas_locales.add(firma_unica)
 
         if nuevos_registros:
-            SHEET_ALERTAS.append_rows(nuevos_registros)
-            print(f"⚠️ Alertas: {len(nuevos_registros)} registros inyectados.")
+            conn = get_db_connection()
+            cur = conn.cursor()
+            insert_query = """
+                INSERT INTO alertas_live (timestamp_captura, firma_unica, alert_id, tipo_alerta, entidades_afectadas, descripcion) 
+                VALUES %s ON CONFLICT (firma_unica) DO NOTHING
+            """
+            execute_values(cur, insert_query, nuevos_registros)
+            conn.commit()
+            cur.close()
+            conn.close()
+            print(f"⚠️ Alertas SQL: {len(nuevos_registros)} procesadas.")
 
     except Exception as e:
-        print(f"❌ Error en extracción de ALERTAS: {e}")
+        print(f"❌ Error en extracción de ALERTAS SQL: {e}")
 
 # --- ENDPOINTS FASTAPI ---
-
 @app.get("/")
 def home():
-    return {"status": "online", "msg": "Recolector Cercanías ML Modular - Operativo"}
-
-@app.get("/ping")
-def ping():
-    return {"status": "alive", "timestamp": datetime.now(ZONA_HORARIA).isoformat()}
-
-@app.get("/recolectar")
-def recolectar_posiciones():
-    threading.Thread(target=ejecutar_extraccion_posiciones).start()
-    return {"status": "started", "msg": "Extracción de Posiciones iniciada en background"}
-
-@app.get("/recolectar_horarios")
-def recolectar_horarios():
-    threading.Thread(target=ejecutar_extraccion_horarios).start()
-    return {"status": "started", "msg": "Extracción de Horarios/Retrasos iniciada en background"}
-
-@app.get("/recolectar_alertas")
-def recolectar_alertas():
-    threading.Thread(target=ejecutar_extraccion_alertas).start()
-    return {"status": "started", "msg": "Extracción de Alertas iniciada en background"}
+    return {"status": "online", "msg": "Recolector SQL Cercanías - Operativo"}
 
 @app.get("/recolectar_todo")
 def recolectar_todo():
     threading.Thread(target=ejecutar_extraccion_posiciones).start()
     threading.Thread(target=ejecutar_extraccion_horarios).start()
     threading.Thread(target=ejecutar_extraccion_alertas).start()
-    return {"status": "started", "msg": "Extracción paralela de Posiciones, Horarios y Alertas iniciada."}
+    return {"status": "started", "msg": "Extracción SQL paralela iniciada."}
 
 if __name__ == '__main__':
     import uvicorn
